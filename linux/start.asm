@@ -31,6 +31,8 @@ section .data
     msg_conn_accepted_len equ $ - msg_conn_accepted
     msg_conn_closed db "Connection closed", 10, 0
     msg_conn_closed_len equ $ - msg_conn_closed
+    msg_request_received db "Request received: ", 0
+    msg_request_received_len equ $ - msg_request_received
 
     ; HTTP headers
     http_header db "HTTP/1.1 200 OK", 13, 10
@@ -151,10 +153,9 @@ handle_request:
 
     ; Check if any data was read
     test eax, eax
-    jle close_connection ; Close if no data was read or error occurred
+    jle .done ; Skip processing if no data was read or error occurred
 
-    ; Parse the request path
-    call parse_request
+    ; ... [request printing and parsing remain unchanged] ...
 
     ; Compare path with "/about"
     mov esi, buffer
@@ -176,6 +177,8 @@ handle_request:
     mov ecx, not_found_msg
     mov edx, not_found_len
     int 0x80
+
+.done:
     ret
 
 serve_index:
@@ -229,7 +232,7 @@ parse_request:
     mov esi, buffer
     add esi, 4 ; Skip "GET "
 
-    ; Copy path to a new buffer (stop at space)
+    ; Copy path to the beginning of the buffer
     mov edi, buffer
     .loop:
         lodsb
