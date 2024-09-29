@@ -37,7 +37,7 @@ EXTERN about_content:BYTE
     about_page db "/about", 0
     not_found db "404 Not Found", 0
     error_msg db "Error: %s (code %d)", 13, 10, 0
-    success_msg db "Success: Server started on port 80", 13, 10, 0
+    success_msg db "Success: Server started on port 80 debug mode windows", 13, 10, 0
     accept_msg db "Accepted new connection from %d.%d.%d.%d:%d", 13, 10, 0
     request_msg db "Received request: %s", 13, 10, 0
     close_msg db "Closed client connection", 13, 10, 0

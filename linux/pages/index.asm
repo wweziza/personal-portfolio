@@ -1,5 +1,6 @@
 section .data
     global index_content
+    global index_content_end
 
 index_content:
     db "<html><head>"
@@ -103,9 +104,10 @@ index_content:
     db "    <span class='skill'>Assembly</span>"
     db "    <span class='skill'>Low-level Programming</span>"
     db "    <span class='skill'>Web Development</span>"
-    db "    <span class='skill'>Innovation</span>"
+    db "    <span class='skill'>This not something called Innovation, but yeah assembly.</span>"
     db "</div>"
     db "<p class='open-source'>Proud of this project? It's open source! "
     db "Check out the code <a href='https://github.com/wweziza/personal-portfolio' target='_blank'>here</a>.</p>"
     db "</div>"
     db "</body></html>", 0
+index_content_end:

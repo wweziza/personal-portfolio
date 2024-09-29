@@ -1,254 +1,301 @@
-; Linux x86 Assembly HTTP Server
+; server.asm
+; Compile with: nasm -f elf32 server.asm
+; Link with: ld -m elf_i386 server.o pages/index.o pages/about.o -o server
 
 extern index_content
+extern index_content_end
 extern about_content
+extern about_content_end
 
 section .data
-    ; Constants
-    STDIN equ 0
-    STDOUT equ 1
-    STDERR equ 2
-    AF_INET equ 2
-    SOCK_STREAM equ 1
-    INADDR_ANY equ 0
-    SOL_SOCKET equ 1
-    SO_REUSEADDR equ 2
+    listen_sock dd 0
+    client_sock dd 0
+    
+    ; HTTP response headers
+    http_ok db 'HTTP/1.1 200 OK', 13, 10
+    content_type db 'Content-Type: text/html', 13, 10
+    content_length_header db 'Content-Length: ', 0
+    newline db 13, 10, 13, 10
 
-    ; System call numbers
-    SYS_READ equ 3
-    SYS_WRITE equ 4
-    SYS_SOCKET equ 359
-    SYS_BIND equ 361
-    SYS_LISTEN equ 363
-    SYS_ACCEPT equ 364
-    SYS_CLOSE equ 6
-    SYS_EXIT equ 1
+    ; Error messages
+    error_socket db 'Failed to create socket', 10, 0
+    error_bind db 'Failed to bind to port', 10, 0
+    error_listen db 'Failed to listen on socket', 10, 0
+    error_accept db 'Failed to accept client connection', 10, 0
 
-    ; Messages
-    msg_server_start db "Server started on port 80", 10, 0
-    msg_server_start_len equ $ - msg_server_start
-    msg_conn_accepted db "New connection accepted", 10, 0
-    msg_conn_accepted_len equ $ - msg_conn_accepted
-    msg_conn_closed db "Connection closed", 10, 0
-    msg_conn_closed_len equ $ - msg_conn_closed
-    msg_request_received db "Request received: ", 0
-    msg_request_received_len equ $ - msg_request_received
+    ; Debug messages
+    debug_request db 'Received request: ', 0
+    debug_route_index db 'Matched index route', 10, 0
+    debug_route_about db 'Matched about route', 10, 0
+    debug_route_unknown db 'Unknown route', 10, 0
 
-    ; HTTP headers
-    http_header db "HTTP/1.1 200 OK", 13, 10
-                db "Content-Type: text/html", 13, 10
-                db "Connection: close", 13, 10, 13, 10
-    http_header_len equ $ - http_header
+    ; Request buffer
+    request_buffer times 1024 db 0
 
-    ; Socket address structure
-    sockaddr_in:
-        sin_family dw AF_INET
-        sin_port dw 0x5000 ; Port 80 in network byte order
-        sin_addr dd INADDR_ANY
-        sin_zero times 8 db 0
-
-    ; Paths
-    path_root db "/", 0
-    path_about db "/about", 0
-
-    ; Not found message
-    not_found_msg db "HTTP/1.1 404 Not Found", 13, 10
-                  db "Content-Type: text/html", 13, 10
-                  db "Connection: close", 13, 10, 13, 10
-                  db "<html><body><h1>404 Not Found</h1></body></html>", 0
-    not_found_len equ $ - not_found_msg
+    ; Routes
+    route_index db 'GET / ', 0
+    route_about db 'GET /about ', 0
 
 section .bss
-    sockfd resd 1
-    clientfd resd 1
-    buffer resb 1024
+    sockaddr_in resb 16
+    content_length_str resb 20
 
 section .text
     global _start
 
 _start:
     ; Create socket
-    mov eax, SYS_SOCKET
-    mov ebx, AF_INET
-    mov ecx, SOCK_STREAM
-    xor edx, edx
-    int 0x80
-    mov [sockfd], eax
-
-    ; Set SO_REUSEADDR
-    push dword 1
+    mov eax, 102         ; socketcall
+    mov ebx, 1           ; SYS_SOCKET
+    push 0               ; Protocol
+    push 1               ; SOCK_STREAM
+    push 2               ; AF_INET
     mov ecx, esp
-    push dword 4
-    push ecx
-    push dword SO_REUSEADDR
-    push dword SOL_SOCKET
-    push dword [sockfd]
-    mov eax, 366 ; setsockopt
-    mov ebx, [sockfd]
-    mov ecx, SOL_SOCKET
-    mov edx, SO_REUSEADDR
     int 0x80
-    add esp, 20
+    add esp, 12
+    test eax, eax
+    js exit_error
+    mov [listen_sock], eax
 
-    ; Bind socket
-    mov eax, SYS_BIND
-    mov ebx, [sockfd]
-    mov ecx, sockaddr_in
+    ; Bind to port 80
+    mov word [sockaddr_in], 2          ; AF_INET
+    mov word [sockaddr_in + 2], 0x5000  ; Port 80 (network byte order)
+    mov dword [sockaddr_in + 4], 0      ; INADDR_ANY
+
+    mov eax, 102         ; socketcall
+    mov ebx, 2           ; SYS_BIND
+    push 16              ; sockaddr_in size
+    push sockaddr_in     ; sockaddr_in struct
+    push dword [listen_sock]  ; socket fd
+    mov ecx, esp
+    int 0x80
+    add esp, 12
+    test eax, eax
+    js exit_error
+
+    ; Listen for connections
+    mov eax, 102         ; socketcall
+    mov ebx, 4           ; SYS_LISTEN
+    push 5               ; backlog
+    push dword [listen_sock]  ; socket fd
+    mov ecx, esp
+    int 0x80
+    add esp, 8
+    test eax, eax
+    js exit_error
+
+accept_loop:
+    ; Accept client connection
+    mov eax, 102         ; socketcall
+    mov ebx, 5           ; SYS_ACCEPT
+    push 0               ; addrlen
+    push 0               ; addr
+    push dword [listen_sock]  ; socket fd
+    mov ecx, esp
+    int 0x80
+    add esp, 12
+    test eax, eax
+    js exit_error
+    mov [client_sock], eax
+
+    ; Read request
+    mov eax, 3           ; read
+    mov ebx, [client_sock]
+    mov ecx, request_buffer
+    mov edx, 1024
+    int 0x80
+
+    ; Debug: Print received request
+    push eax
+    push ecx
+    mov eax, 4
+    mov ebx, 1
+    mov ecx, debug_request
+    mov edx, 19
+    int 0x80
+    mov eax, 4
+    mov ebx, 1
+    mov ecx, request_buffer
+    pop edx
+    int 0x80
+    pop ecx
+
+    ; Parse request and send response
+    mov esi, request_buffer
+    mov edi, route_about
+    call string_compare
+    test eax, eax
+    jz .send_about
+
+    mov esi, request_buffer
+    mov edi, route_index
+    call string_compare
+    test eax, eax
+    jz .send_index
+
+    ; Unknown route
+    mov eax, 4
+    mov ebx, 1
+    mov ecx, debug_route_unknown
+    mov edx, 14
+    int 0x80
+    jmp .send_index  ; Default to index for unknown routes
+
+.send_index:
+    mov eax, 4
+    mov ebx, 1
+    mov ecx, debug_route_index
+    mov edx, 19
+    int 0x80
+    mov esi, index_content
+    mov edi, index_content_end
+    jmp .send_response
+
+.send_about:
+    mov eax, 4
+    mov ebx, 1
+    mov ecx, debug_route_about
+    mov edx, 19
+    int 0x80
+    mov esi, about_content
+    mov edi, about_content_end
+
+.send_response:
+    ; Calculate content length
+    mov eax, edi
+    sub eax, esi
+    push eax
+    call int_to_string
+
+    ; Send HTTP headers
+    mov eax, 4
+    mov ebx, [client_sock]
+    mov ecx, http_ok
+    mov edx, 17
+    int 0x80
+
+    mov eax, 4
+    mov ebx, [client_sock]
+    mov ecx, content_type
+    mov edx, 25
+    int 0x80
+
+    mov eax, 4
+    mov ebx, [client_sock]
+    mov ecx, content_length_header
     mov edx, 16
     int 0x80
 
-    ; Listen for connections
-    mov eax, SYS_LISTEN
-    mov ebx, [sockfd]
-    mov ecx, 5
+    mov eax, 4
+    mov ebx, [client_sock]
+    mov ecx, content_length_str
+    mov edx, eax
     int 0x80
 
-    ; Print server start message
-    mov eax, SYS_WRITE
-    mov ebx, STDOUT
-    mov ecx, msg_server_start
-    mov edx, msg_server_start_len
+    mov eax, 4
+    mov ebx, [client_sock]
+    mov ecx, newline
+    mov edx, 4
     int 0x80
 
-accept_loop:
-    ; Accept connection
-    mov eax, SYS_ACCEPT
-    mov ebx, [sockfd]
-    xor ecx, ecx
-    xor edx, edx
-    int 0x80
-    mov [clientfd], eax
-
-    ; Print connection accepted message
-    mov eax, SYS_WRITE
-    mov ebx, STDOUT
-    mov ecx, msg_conn_accepted
-    mov edx, msg_conn_accepted_len
+    ; Send content
+    mov eax, 4
+    mov ebx, [client_sock]
+    mov ecx, esi
+    pop edx
     int 0x80
 
-    ; Handle client request
-    call handle_request
-
-    ; Close client connection
-    mov eax, SYS_CLOSE
-    mov ebx, [clientfd]
-    int 0x80
-
-    ; Print connection closed message
-    mov eax, SYS_WRITE
-    mov ebx, STDOUT
-    mov ecx, msg_conn_closed
-    mov edx, msg_conn_closed_len
+    ; Close client socket
+    mov eax, 6
+    mov ebx, [client_sock]
     int 0x80
 
     jmp accept_loop
 
-handle_request:
-    ; Read client request
-    mov eax, SYS_READ
-    mov ebx, [clientfd]
-    mov ecx, buffer
-    mov edx, 1024
+exit_error:
+    ; Print error message
+    mov eax, 4
+    mov ebx, 2
+    mov ecx, error_socket
+    mov edx, 26
     int 0x80
 
-    ; Check if any data was read
-    test eax, eax
-    jle .done ; Skip processing if no data was read or error occurred
-
-    ; ... [request printing and parsing remain unchanged] ...
-
-    ; Compare path with "/about"
-    mov esi, buffer
-    mov edi, path_about
-    call strcmp
-    test eax, eax
-    jz serve_about
-
-    ; Compare path with "/"
-    mov esi, buffer
-    mov edi, path_root
-    call strcmp
-    test eax, eax
-    jz serve_index
-
-    ; If no match, send 404 response
-    mov eax, SYS_WRITE
-    mov ebx, [clientfd]
-    mov ecx, not_found_msg
-    mov edx, not_found_len
+    ; Exit
+    mov eax, 1
+    mov ebx, 1
     int 0x80
+; Compare two null-terminated strings
+; esi: first string (request), edi: second string (route)
+; Returns 0 if route matches, non-zero if different
+; Compare only the first few characters of the request
+string_compare:
+    push esi
+    push edi
+    .loop:
+        mov al, [esi]
+        mov bl, [edi]
+        cmp bl, 0  ; Stop if we've reached the end of the route string
+        je .equal
+        cmp al, bl
+        jne .not_equal
+        inc esi
+        inc edi
+        jmp .loop
+    .not_equal:
+        mov eax, 1
+        jmp .done
+    .equal:
+        xor eax, eax
+    .done:
+        pop edi
+        pop esi
+        ret
+
+
+
+; Convert integer to string
+; eax: integer to convert
+; Returns: eax = length of string, content_length_str = resulting string
+int_to_string:
+    push ebx
+    push ecx
+    push edx
+    push esi
+    mov ebx, 10
+    mov esi, content_length_str
+    add esi, 19  ; Start from the end of the buffer
+    mov byte [esi], 0  ; Null-terminate
+
+    ; Handle the special case of 0
+    test eax, eax
+    jnz .loop
+    dec esi
+    mov byte [esi], '0'
+    jmp .done
+
+.loop:
+    xor edx, edx
+    div ebx
+    add dl, '0'
+    dec esi
+    mov [esi], dl
+    test eax, eax
+    jnz .loop
 
 .done:
+    ; Calculate length
+    mov eax, content_length_str
+    add eax, 19
+    sub eax, esi  ; eax now contains the length of the string
+
+    ; Move the string to the beginning of the buffer
+    mov ecx, eax  ; ecx = length
+    inc ecx       ; include null terminator
+    mov edi, content_length_str
+    rep movsb
+
+    pop esi
+    pop edx
+    pop ecx
+    pop ebx
     ret
-
-serve_index:
-    ; Send HTTP header
-    mov eax, SYS_WRITE
-    mov ebx, [clientfd]
-    mov ecx, http_header
-    mov edx, http_header_len
-    int 0x80
-
-    ; Send index content
-    mov eax, SYS_WRITE
-    mov ebx, [clientfd]
-    mov ecx, index_content
-    mov edx, 2048 ; Adjust this based on actual content size
-    int 0x80
-    ret
-
-serve_about:
-    ; Send HTTP header
-    mov eax, SYS_WRITE
-    mov ebx, [clientfd]
-    mov ecx, http_header
-    mov edx, http_header_len
-    int 0x80
-
-    ; Send about content
-    mov eax, SYS_WRITE
-    mov ebx, [clientfd]
-    mov ecx, about_content
-    mov edx, 2048 ; Adjust this based on actual content size
-    int 0x80
-    ret
-
-strcmp:
-    ; Compare strings in ESI and EDI
-    .loop:
-        lodsb           ; Load byte from [ESI]
-        scasb           ; Compare it with byte at [EDI]
-        jne .not_equal  ; If not equal, exit with non-zero
-        test al, al     ; Check if end of string (null terminator)
-        jnz .loop       ; If not end, continue loop
-        xor eax, eax    ; If equal, set eax to 0
-        ret
-    .not_equal:
-        mov eax, 1      ; Set eax to non-zero to indicate not equal
-        ret
-
-parse_request:
-    ; Simple path parsing (assumes request starts with "GET ")
-    mov esi, buffer
-    add esi, 4 ; Skip "GET "
-
-    ; Copy path to the beginning of the buffer
-    mov edi, buffer
-    .loop:
-        lodsb
-        cmp al, ' '
-        je .done
-        stosb
-        jmp .loop
-    .done:
-    xor al, al  ; Null-terminate the string
-    stosb
-    ret
-
-close_connection:
-    ret
-
-exit:
-    mov eax, SYS_EXIT
-    xor ebx, ebx
-    int 0x80
